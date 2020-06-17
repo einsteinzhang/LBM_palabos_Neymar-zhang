@@ -1,0 +1,181 @@
+/* This file is part of the Palabos library.
+ *
+ * The Palabos softare is developed since 2011 by FlowKit-Numeca Group Sarl
+ * (Switzerland) and the University of Geneva (Switzerland), which jointly
+ * own the IP rights for most of the code base. Since October 2019, the
+ * Palabos project is maintained by the University of Geneva and accepts
+ * source code contributions from the community.
+ * 
+ * Contact:
+ * Jonas Latt
+ * Computer Science Department
+ * University of Geneva
+ * 7 Route de Drize
+ * 1227 Carouge, Switzerland
+ * jonas.latt@unige.ch
+ *
+ * The most recent release of Palabos can be downloaded at 
+ * <https://palabos.unige.ch/>
+ *
+ * The library Palabos is free software: you can redistribute it and/or
+ * modify it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * The library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "palabos2D.h"
+#include "palabos2D.hh"
+#include <vector>
+#include <iostream>
+#include <iomanip>
+
+/* Code 1.5 in the Palabos tutorial
+ */
+
+using namespace plb;
+using namespace std;
+
+typedef double T;
+#define DESCRIPTOR plb::descriptors::D2Q9Descriptor
+
+/// Velocity on the parabolic Poiseuille profile
+T poiseuilleVelocity(plint iY, IncomprFlowParam<T> const& parameters) {
+    T y = (T)iY / parameters.getResolution();
+    return 4.*parameters.getLatticeU() * (y-y*y);
+}
+
+/// A functional, used to initialize the velocity for the boundary conditions
+template<typename T>
+class PoiseuilleVelocity {
+public:
+    PoiseuilleVelocity(IncomprFlowParam<T> parameters_)
+        : parameters(parameters_)
+    { }
+    /// This version of the operator returns the velocity only,
+    ///    to instantiate the boundary condition.
+    void operator()(plint iX, plint iY, Array<T,2>& u) const {
+        u[0] = poiseuilleVelocity(iY, parameters);
+        u[1] = T();
+    }
+    /// This version of the operator returns also a constant value for
+    ///    the density, to create the initial condition.
+    void operator()(plint iX, plint iY, T& rho, Array<T,2>& u) const {
+        u[0] = poiseuilleVelocity(iY, parameters);
+        u[1] = T();
+        rho  = (T)1;
+    }
+private:
+    IncomprFlowParam<T> parameters;
+};
+
+void channelSetup (
+        MultiBlockLattice2D<T,DESCRIPTOR>& lattice,
+        IncomprFlowParam<T> const& parameters,
+        OnLatticeBoundaryCondition2D<T,DESCRIPTOR>& boundaryCondition )
+{
+    // Create Velocity boundary conditions.
+    boundaryCondition.setVelocityConditionOnBlockBoundaries(lattice);
+
+    // Specify the boundary velocity.
+    setBoundaryVelocity (
+            lattice, lattice.getBoundingBox(),
+            PoiseuilleVelocity<T>(parameters) );
+
+    // Create the initial condition.
+    initializeAtEquilibrium (
+           lattice, lattice.getBoundingBox(), PoiseuilleVelocity<T>(parameters) );
+
+    lattice.initialize();
+}
+
+void writeGifs(MultiBlockLattice2D<T,DESCRIPTOR>& lattice, plint iter)
+{
+    const plint imSize = 600;
+    ImageWriter<T> imageWriter("leeloo");
+    imageWriter.writeScaledGif(createFileName("u", iter, 6),
+                               *computeVelocityNorm(lattice),
+                               imSize, imSize );
+}
+
+// Write a VTK file which can be post-processed for example in ParaView.
+void writeVTK(MultiBlockLattice2D<T,DESCRIPTOR>& lattice,
+              IncomprFlowParam<T> const& parameters, plint iter)
+{
+    T dx = parameters.getDeltaX();
+    T dt = parameters.getDeltaT();
+    VtkImageOutput2D<T> vtkOut(createFileName("vtk", iter, 6), dx);
+    vtkOut.writeData<float>(*computeDensity(lattice), "density", 1.);
+    vtkOut.writeData<2,float>(*computeVelocity(lattice), "velocity", dx/dt);
+}
+
+
+int main(int argc, char* argv[]) {
+    plbInit(&argc, &argv);
+
+    global::directories().setOutputDir("./tmp_5/");
+
+    // Use the class IncomprFlowParam to convert from
+    //   dimensionless variables to lattice units, in the
+    //   context of incompressible flows.
+    IncomprFlowParam<T> parameters(
+            (T) 1e-2,  // Reference velocity (the maximum velocity
+                       //   in the Poiseuille profile) in lattice units.
+            (T) 300.,  // Reynolds number
+            299,       // Resolution of the reference length (channel height).
+            3.,        // Channel length in dimensionless variables
+            1.         // Channel height in dimensionless variables
+    );
+    //const T imSave   = (T)0.1;  // Time intervals at which to save GIF
+                                //   images, in dimensionless time units.
+    //const T maxT     = (T)3.1;  // Total simulation time, in dimensionless
+                                //   time units.
+
+    writeLogFile(parameters, "Poiseuille flow");
+
+    MultiBlockLattice2D<T, DESCRIPTOR> lattice (
+             parameters.getNx(), parameters.getNy(),
+             new BGKdynamics<T,DESCRIPTOR>(parameters.getOmega()) );
+
+    OnLatticeBoundaryCondition2D<T,DESCRIPTOR>*
+        boundaryCondition = createLocalBoundaryCondition2D<T,DESCRIPTOR>();
+
+    MultiScalarField2D<bool> boolMask(parameters.getNx(), parameters.getNy());
+       plb_ifstream ifile("1.dat");
+       ifile >> boolMask;
+       defineDynamics(lattice, boolMask, new BounceBack<T,DESCRIPTOR>, true);
+
+
+    channelSetup(lattice, parameters, *boundaryCondition);
+
+    // Main loop over time iterations.
+    for (plint iT=0; iT<40000; ++iT) {
+        if (iT%1000==0) {
+           // pcout << "Saving Gif at time step " << iT << endl;
+           // writeGifs(lattice, iT);
+       	pcout << "Writing image at dimensionless time " << iT*parameters.getDeltaT() << endl;
+            ImageWriter<T> imageWriter("leeloo");
+            imageWriter.writeScaledGif (
+                    createFileName("velocity", iT, 6),
+                    *computeVelocityNorm(lattice) );
+            pcout << computeAverageEnergy(lattice) << endl;
+
+	//create VTK
+	pcout << "Writing VTK file at time "
+                      << iT*parameters.getDeltaT() << endl;
+                writeVTK(lattice, parameters, iT);
+
+        }
+        // Execute lattice Boltzmann iteration.
+        lattice.collideAndStream();
+    }
+
+    delete boundaryCondition;
+}
